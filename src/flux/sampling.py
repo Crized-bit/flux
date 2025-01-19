@@ -6,8 +6,9 @@ import torch
 from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
+from tqdm import tqdm
 
-from .model import Flux
+from .model import Flux, Flux_optimized
 from .modules.autoencoder import AutoEncoder
 from .modules.conditioner import HFEmbedder
 from .modules.image_embedders import CannyImageEncoder, DepthImageEncoder, ReduxImageEncoder
@@ -254,7 +255,7 @@ def denoise(
 ):
     # this is ignored for schnell
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
-    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+    for t_curr, t_prev in tqdm(zip(timesteps[:-1], timesteps[1:])):
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         pred = model(
             img=torch.cat((img, img_cond), dim=-1) if img_cond is not None else img,
@@ -270,6 +271,53 @@ def denoise(
 
     return img
 
+def denoise_control(
+    model: Flux_optimized,
+    # model input
+    img: Tensor,
+    img_ids: Tensor,
+    txt: Tensor,
+    txt_ids: Tensor,
+    vec: Tensor,
+    # sampling parameters
+    timesteps: list[float],
+    controlnet_model,
+    img_cond: Tensor,
+    guidance: float = 4.0,
+    # extra img tokens
+):
+    # this is ignored for schnell
+    guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
+    for t_curr, t_prev in tqdm(zip(timesteps[:-1], timesteps[1:])):
+        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+
+        block_res_samples = controlnet_model(
+            img=img,
+            img_ids=img_ids,
+            txt=txt,
+            txt_ids=txt_ids,
+            controlnet_cond=img_cond,
+            y=vec,
+            timesteps=t_vec,
+            guidance=guidance_vec,
+        )
+        
+        pred = model(
+            img=img,
+            img_ids=img_ids,
+            txt=txt,
+            txt_ids=txt_ids,
+            y=vec,
+            block_controlnet_hidden_states=[
+                        sample for sample in block_res_samples
+                    ],
+            timesteps=t_vec,
+            guidance=guidance_vec,
+        )
+
+        img = img + (t_prev - t_curr) * pred
+
+    return img
 
 def unpack(x: Tensor, height: int, width: int) -> Tensor:
     return rearrange(
